@@ -10,6 +10,7 @@ import (
 	"github.com/cube2222/octosql"
 	"github.com/cube2222/octosql/docs"
 	"github.com/cube2222/octosql/execution"
+	"github.com/cube2222/octosql/storage"
 )
 
 type Tumble struct {
@@ -32,32 +33,46 @@ func (r *Tumble) Document() docs.Documentation {
 	return docs.Section(
 		"tumble",
 		docs.Body(
-			docs.Section("Calling", docs.List(docs.Text("tumble(source => \\<Source\\>, time_field => \\<Descriptor\\>, window_length => \\<interval\\>, offset => \\<interval\\>)"))),
-			docs.Section("Description", docs.Text("Adds window_start and window_end of the record, based on which window the time_field value falls into. The source may be specified as a subquery or as TABLE(tablename), and the time_field should be specified as DESCRIPTOR(field_name).")),
+			docs.Section("Calling", docs.Text("tumble(source => \\<Source\\>, time_field => \\<Descriptor\\>, window_length => \\<interval\\>, offset => \\<interval\\>)")),
+			docs.Section("Description", docs.Text("Adds window_start and window_end of the record, based on which window the time_field value falls into.")),
+			docs.Section("Example", docs.Text("```\nWITH"+
+				"\n     with_tumble AS (SELECT * FROM tumble("+
+				"\n                     source=>TABLE(events),"+
+				"\n                     time_field=>DESCRIPTOR(e.time),"+
+				"\n                     window_length=> INTERVAL 1 MINUTE,"+
+				"\n                     offset => INTERVAL 0 SECONDS) e),"+
+				"\nSELECT e.team, COUNT(*) as goals\nFROM with_tumble e\nGROUP BY e.team\nTRIGGER COUNTING 100, ON WATERMARK"+
+				"\n```")),
 		),
 	)
 }
 
-func (r *Tumble) Get(ctx context.Context, variables octosql.Variables) (execution.RecordStream, error) {
-	source, err := r.source.Get(ctx, variables)
+func (r *Tumble) Get(ctx context.Context, variables octosql.Variables, streamID *execution.StreamID) (execution.RecordStream, *execution.ExecutionOutput, error) {
+	tx := storage.GetStateTransactionFromContext(ctx)
+	sourceStreamID, err := execution.GetSourceStreamID(tx.WithPrefix(streamID.AsPrefix()), octosql.MakePhantom())
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't get source")
+		return nil, nil, errors.Wrap(err, "couldn't get source stream ID")
+	}
+
+	source, execOutput, err := r.source.Get(ctx, variables, sourceStreamID)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "couldn't get source")
 	}
 
 	duration, err := r.windowLength.ExpressionValue(ctx, variables)
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't get window length")
+		return nil, nil, errors.Wrap(err, "couldn't get window length")
 	}
 	if duration.GetType() != octosql.TypeDuration {
-		return nil, errors.Errorf("invalid tumble duration: %v", duration)
+		return nil, nil, errors.Errorf("invalid tumble duration: %v", duration)
 	}
 
 	offset, err := r.offset.ExpressionValue(ctx, variables)
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't get window offset")
+		return nil, nil, errors.Wrap(err, "couldn't get window offset")
 	}
 	if offset.GetType() != octosql.TypeDuration {
-		return nil, errors.Errorf("invalid tumble offset: %v", duration)
+		return nil, nil, errors.Errorf("invalid tumble offset: %v", offset)
 	}
 
 	return &TumbleStream{
@@ -65,7 +80,7 @@ func (r *Tumble) Get(ctx context.Context, variables octosql.Variables) (executio
 		timeField:    r.timeField,
 		windowLength: duration.AsDuration(),
 		offset:       offset.AsDuration(),
-	}, nil
+	}, execOutput, nil
 }
 
 type TumbleStream struct {
@@ -86,7 +101,7 @@ func (s *TumbleStream) Next(ctx context.Context) (*execution.Record, error) {
 
 	timeValue := srcRecord.Value(s.timeField)
 	if timeValue.GetType() != octosql.TypeTime {
-		return nil, fmt.Errorf("couldn't get time field '%v' as time, got: %v", s.timeField.String(), srcRecord.Value(s.timeField))
+		return nil, fmt.Errorf("couldn't get time field '%v' as time, got: %v", s.timeField.String(), srcRecord.Value(s.timeField).Show())
 	}
 
 	windowStart := timeValue.AsTime().Add(-1 * s.offset).Truncate(s.windowLength).Add(s.offset)
@@ -108,6 +123,10 @@ func (s *TumbleStream) Next(ctx context.Context) (*execution.Record, error) {
 	return newRecord, nil
 }
 
-func (s *TumbleStream) Close() error {
-	return s.source.Close()
+func (s *TumbleStream) Close(ctx context.Context, storage storage.Storage) error {
+	if err := s.source.Close(ctx, storage); err != nil {
+		return errors.Wrap(err, "couldn't close underlying stream")
+	}
+
+	return nil
 }

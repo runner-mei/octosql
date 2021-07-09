@@ -54,3 +54,11 @@ func (fe *FunctionExpression) Physical(ctx context.Context, physicalCreator *Phy
 
 	return physical.NewFunctionExpression(fe.name, args), variables, nil
 }
+
+func (fe *FunctionExpression) Visualize() *graph.Node {
+	n := graph.NewNode("Function(" + fe.name + ")")
+	for idx, arg := range fe.arguments {
+		n.AddChild("arg_"+strconv.Itoa(idx), arg.Visualize())
+	}
+	return n
+}

@@ -21,6 +21,10 @@ func main() {
 	}
 
 	var body []docs.Documentation
+
+	body = append(body, docs.TableOfContents(aggregateNames, aggregateNames))
+	body = append(body, docs.Divider())
+
 	for i := range aggregateDocs {
 		body = append(body, aggregateDocs[i])
 		if i != len(aggregateDocs)-1 {
